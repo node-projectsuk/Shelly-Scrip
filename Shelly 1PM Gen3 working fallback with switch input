@@ -1,0 +1,109 @@
+// Initialize variables
+let mqtt_connected = false;     // Tracks MQTT connection status
+let failover_mode = false;      // Tracks failover mode
+let relay_activated = false;    // Tracks whether relay has been activated
+let output_state = false;       // Tracks the relay's state
+
+// 1. Set output OFF at startup
+Shelly.call("Switch.Set", {id: 0, on: false}, function() {
+  output_state = false;
+  print("Output initialized to OFF at startup");
+});
+
+// 2. Handle MQTT connection and disconnection events
+Shelly.addEventHandler(function(event) {
+  if (event.component === "mqtt") {
+    // Handle MQTT connected
+    if (event.info.event === "connected" && !mqtt_connected) {
+      mqtt_connected = true;
+      failover_mode = false;
+      relay_activated = false;  // Reset relay activation on reconnect
+      print("MQTT connected: Normal operation resumed");
+    }
+
+    // Handle MQTT disconnected
+    if (event.info.event === "disconnected" && mqtt_connected) {
+      mqtt_connected = false;
+      print("MQTT disconnected: Monitoring for failover");
+
+      // Enable failover mode after 5 seconds if still disconnected
+      Timer.set(5000, false, function() {
+        if (!mqtt_connected) {
+          failover_mode = true;
+          print("Failover mode activated: Input will directly control output");
+        }
+      }, null);
+    }
+    return; // Exit after handling MQTT events
+  }
+
+  // Handle input state changes
+  if (event.component === "input:0") {
+    let input_state;
+
+    // Case 1: Normal MQTT operation
+    if (event.params && event.params["input:0"] && event.params["input:0"].state !== undefined) {
+      input_state = event.params["input:0"].state;
+    }
+    // Case 2: MQTT disconnected, state is in event.info.state
+    else if (event.info && event.info.state !== undefined) {
+      input_state = event.info.state;
+    }
+    // If neither case is valid, log an error and exit
+    else {
+      print("Error: Invalid input structure. Event data:", JSON.stringify(event));
+      return;
+    }
+
+    print("Input state changed to:", input_state);
+
+    // Failover mode: Input directly controls output
+    if (failover_mode) {
+      Shelly.call("Switch.Set", {id: 0, on: input_state}, function() {
+        output_state = input_state;
+        print("Failover mode: Output set to", input_state);
+      });
+    }
+    // Normal MQTT operation
+    else if (mqtt_connected) {
+      // Activate relay on first input change
+      if (!relay_activated) {
+        if (input_state) {
+          Shelly.call("Switch.Set", {id: 0, on: true}, function() {
+            output_state = true;
+            relay_activated = true;
+            print("First input change: Output turned ON and will remain ON");
+          });
+        }
+      }
+    }
+  }
+});
+
+// 3. Periodic check to ensure MQTT status is handled correctly
+Timer.set(1000, true, function() {
+  // Check MQTT connection status every second
+  Shelly.call("Shelly.GetStatus", {}, function(status) {
+    let is_connected = status.mqtt.connected;
+
+    if (is_connected && !mqtt_connected) {
+      // MQTT reconnected
+      mqtt_connected = true;
+      failover_mode = false;
+      relay_activated = false;  // Reset relay activation on reconnect
+      print("MQTT connected: Normal operation resumed");
+    } else if (!is_connected && mqtt_connected) {
+      // MQTT disconnected
+      mqtt_connected = false;
+      print("MQTT disconnected: Monitoring for failover");
+
+      // Enable failover mode after 5 seconds if still disconnected
+      Timer.set(5000, false, function() {
+        if (!mqtt_connected) {
+          failover_mode = true;
+          print("Failover mode activated: Input will directly control output");
+        }
+      }, null);
+    }
+  });
+});
